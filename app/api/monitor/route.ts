@@ -74,12 +74,12 @@ export async function POST(request: Request) {
 
       for (const monitoredTag of db.monitoredTags) {
         try {
-          console.log(`🕵️‍♂️ Checking #${monitoredTag} (Last 48h)...`);
+          console.log(`🕵️‍♂️ Checking #${monitoredTag}...`);
 
           const run = await client.actor("apify/instagram-hashtag-scraper").call({
               "hashtags": [monitoredTag],
               "resultsLimit": 20, 
-              "resultsType": "recent", // Force Chronological
+              "resultsType": "posts", // 👈 FIXED: Changed "recent" to "posts"
           });
 
           const { items } = await client.dataset(run.defaultDatasetId).listItems();
