@@ -8,12 +8,6 @@
     "start": "next start",
     "lint": "eslint"
   },
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  }
   "dependencies": {
     "apify-client": "^2.10.0",
     "clsx": "^2.1.1",
