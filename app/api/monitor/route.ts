@@ -6,24 +6,22 @@ import { getApiKeys } from "@/lib/config";
 export const runtime = 'nodejs'; 
 export const maxDuration = 60; 
 
-// 🧠 HELPER: Calculate "Time Ago"
+// HELPER: Time Ago String
 function getTimeAgo(isoDate: string) {
-    if (!isoDate) return "Unknown date";
+    if (!isoDate) return "Unknown";
     const created = new Date(isoDate);
     const now = new Date();
-    const diffMs = now.getTime() - created.getTime(); // Difference in milliseconds
-    const diffSecs = Math.floor(diffMs / 1000);
-    const diffMins = Math.floor(diffSecs / 60);
+    const diffMs = now.getTime() - created.getTime(); 
+    const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMins / 60);
     const diffDays = Math.floor(diffHours / 24);
 
-    if (diffSecs < 60) return `Just now (${diffSecs}s ago)`;
-    if (diffMins < 60) return `${diffMins} mins ago`;
-    if (diffHours < 24) return `${diffHours} hours ago`;
-    return `${diffDays} days ago`;
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${diffDays}d ago`;
 }
 
-// 🔔 DISCORD SENDER (Updated with Time Field)
+// 🔔 DISCORD SENDER
 async function sendDiscordAlert(webhookUrl: string, leads: any[]) {
     if (!webhookUrl || leads.length === 0) return;
     for (const lead of leads) {
@@ -34,13 +32,13 @@ async function sendDiscordAlert(webhookUrl: string, leads: any[]) {
                 body: JSON.stringify({
                     username: "CaratBridge Watchtower",
                     embeds: [{
-                        title: `💎 New Post: @${lead.companyName}`,
+                        title: `💎 Fresh Post: @${lead.companyName}`,
                         url: lead.website,
-                        color: 3066993, // Green
+                        color: 3066993,
                         fields: [
+                            { name: "Time", value: lead.postAge, inline: true },
                             { name: "Source", value: lead.businessType, inline: true },
-                            { name: "⏰ Posted", value: lead.postAge || "Unknown", inline: true }, // 🆕 NEW FIELD
-                            { name: "Caption", value: lead.notes || "No caption" }
+                            { name: "Caption", value: lead.notes || "-" }
                         ],
                         footer: { text: "CaratBridge Secret Finder" },
                         timestamp: new Date().toISOString()
@@ -56,7 +54,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { action, tag, force } = body;
 
-    // --- STANDARD ACTIONS ---
+    // --- ACTIONS ---
     if (action === "start") { setRunningStatus(true); return NextResponse.json({ success: true, message: "Started" }); }
     if (action === "stop") { setRunningStatus(false); return NextResponse.json({ success: true, message: "Stopped" }); }
     if (action === "add" && tag) { addTag(tag); return NextResponse.json({ success: true }); }
@@ -76,23 +74,29 @@ export async function POST(request: Request) {
 
       for (const monitoredTag of db.monitoredTags) {
         try {
-          console.log(`🕵️‍♂️ Checking #${monitoredTag}...`);
+          console.log(`🕵️‍♂️ Checking #${monitoredTag} (Last 48h)...`);
 
           const run = await client.actor("apify/instagram-hashtag-scraper").call({
               "hashtags": [monitoredTag],
               "resultsLimit": 20, 
-              "resultsType": "posts", 
+              "resultsType": "recent", // Force Chronological
           });
 
           const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
           if (items && items.length > 0) {
               const leads = items.map((item: any, index: number) => {
+                   // 1. STRICT DATE CHECK
+                   const created = new Date(item.timestamp);
+                   const now = new Date();
+                   const diffHours = (now.getTime() - created.getTime()) / (1000 * 60 * 60);
+
+                   // 🚫 REJECT if older than 48 hours (2 Days)
+                   if (diffHours > 48) return null;
+
                    const username = item.ownerUsername || item.owner?.username || "Unknown";
                    const caption = item.caption || "";
                    const emailMatch = caption.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/gi);
-
-                   // 🆕 CALCULATE AGE
                    const age = getTimeAgo(item.timestamp);
 
                    return {
@@ -109,19 +113,18 @@ export async function POST(request: Request) {
                       domain: "instagram.com",
                       emailVerificationStatus: emailMatch ? "valid" : "unknown",
                       score: 90, 
-                      // Save age in specific field for Discord, and in Notes for Dashboard
-                      postAge: age, 
+                      postAge: age,
                       notes: `[${age}] "${caption.substring(0, 50)}..."`
                    };
-              });
+              }).filter(item => item !== null); // Filter out old posts
 
               const newLeadsFound = addLeadsToDb(leads);
 
               if (newLeadsFound.length > 0) {
-                  console.log(`✅ Found ${newLeadsFound.length} NEW posts for #${monitoredTag}`);
+                  console.log(`✅ Found ${newLeadsFound.length} FRESH posts for #${monitoredTag}`);
                   if (DISCORD_WEBHOOK) await sendDiscordAlert(DISCORD_WEBHOOK, newLeadsFound);
               } else {
-                  console.log(`zzz No new posts for #${monitoredTag}`);
+                  console.log(`zzz No posts <48h old for #${monitoredTag}`);
               }
 
               totalNewLeads += newLeadsFound.length;
