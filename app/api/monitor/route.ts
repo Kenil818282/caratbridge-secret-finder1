@@ -24,35 +24,43 @@ function getTimeAgo(isoDate: string) {
 // 🔔 DISCORD SENDER
 async function sendDiscordAlert(webhookUrl: string, leads: any[]) {
     if (!webhookUrl || leads.length === 0) return;
-    for (const lead of leads) {
-        try {
-            await fetch(webhookUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    username: "CaratBridge Watchtower",
-                    embeds: [{
-                        title: `💎 Fresh Post: @${lead.companyName}`,
-                        url: lead.website,
-                        color: 3066993,
-                        fields: [
-                            { name: "Time", value: lead.postAge, inline: true },
-                            { name: "Source", value: lead.businessType, inline: true },
-                            { name: "Caption", value: lead.notes || "-" }
-                        ],
-                        footer: { text: "CaratBridge Secret Finder" },
-                        timestamp: new Date().toISOString()
-                    }]
-                })
-            });
-        } catch (e) { console.error("Discord Error", e); }
+
+    // Send in batches to avoid spamming Discord API too fast
+    const batchSize = 10;
+    for (let i = 0; i < leads.length; i += batchSize) {
+        const batch = leads.slice(i, i + batchSize);
+        for (const lead of batch) {
+            try {
+                await fetch(webhookUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: "CaratBridge Daily Report",
+                        embeds: [{
+                            title: `💎 Daily Catch: @${lead.companyName}`,
+                            url: lead.website,
+                            color: 3066993,
+                            fields: [
+                                { name: "Posted", value: lead.postAge, inline: true },
+                                { name: "Source", value: lead.businessType, inline: true },
+                                { name: "Caption", value: lead.notes ? lead.notes.substring(0, 100) : "-" }
+                            ],
+                            footer: { text: "CaratBridge Secret Finder" },
+                            timestamp: new Date().toISOString()
+                        }]
+                    })
+                });
+                // Small pause to be nice to Discord
+                await new Promise(r => setTimeout(r, 500)); 
+            } catch (e) { console.error("Discord Error", e); }
+        }
     }
 }
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { action, tag, force } = body;
+    const { action, tag, force, limit } = body; // 👈 NOW READING 'limit'
 
     // --- ACTIONS ---
     if (action === "start") { setRunningStatus(true); return NextResponse.json({ success: true, message: "Started" }); }
@@ -67,32 +75,39 @@ export async function POST(request: Request) {
       if (!APIFY_TOKEN) return NextResponse.json({ error: "Missing APIFY_TOKEN" });
 
       const db = getDb();
+      // If we are forcing a Daily Scan, ignore the "Running" switch
       if (!db.isRunning && !force) return NextResponse.json({ success: false, message: "Paused" });
 
       const client = new ApifyClient({ token: APIFY_TOKEN });
       let totalNewLeads = 0;
 
+      // Default to 50 if it's a Daily Scan (force=true), otherwise 20
+      const scanLimit = limit || (force ? 50 : 20); 
+
       for (const monitoredTag of db.monitoredTags) {
         try {
-          console.log(`🕵️‍♂️ Checking #${monitoredTag}...`);
+          console.log(`🕵️‍♂️ Daily Scan: #${monitoredTag} (Fetching ${scanLimit} posts)...`);
 
           const run = await client.actor("apify/instagram-hashtag-scraper").call({
               "hashtags": [monitoredTag],
-              "resultsLimit": 20, 
-              "resultsType": "posts", // 👈 FIXED: Changed "recent" to "posts"
+              "resultsLimit": scanLimit, 
+              "resultsType": "posts", 
           });
 
           const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
+          // SORT NEWEST FIRST
+          items.sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
           if (items && items.length > 0) {
-              const leads = items.map((item: any, index: number) => {
-                   // 1. STRICT DATE CHECK
+              const leads = items.map((item: any) => {
                    const created = new Date(item.timestamp);
                    const now = new Date();
                    const diffHours = (now.getTime() - created.getTime()) / (1000 * 60 * 60);
 
-                   // 🚫 REJECT if older than 48 hours (2 Days)
-                   if (diffHours > 48) return null;
+                   // 🚫 REJECT if older than 24 Hours (Since we run daily)
+                   // You can change this to 48 if you want a buffer
+                   if (diffHours > 26) return null; 
 
                    const username = item.ownerUsername || item.owner?.username || "Unknown";
                    const caption = item.caption || "";
@@ -116,15 +131,13 @@ export async function POST(request: Request) {
                       postAge: age,
                       notes: `[${age}] "${caption.substring(0, 50)}..."`
                    };
-              }).filter(item => item !== null); // Filter out old posts
+              }).filter(item => item !== null);
 
               const newLeadsFound = addLeadsToDb(leads);
 
               if (newLeadsFound.length > 0) {
                   console.log(`✅ Found ${newLeadsFound.length} FRESH posts for #${monitoredTag}`);
                   if (DISCORD_WEBHOOK) await sendDiscordAlert(DISCORD_WEBHOOK, newLeadsFound);
-              } else {
-                  console.log(`zzz No posts <48h old for #${monitoredTag}`);
               }
 
               totalNewLeads += newLeadsFound.length;
