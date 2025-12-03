@@ -6,7 +6,6 @@ import { getApiKeys } from "@/lib/config";
 export const runtime = 'nodejs'; 
 export const maxDuration = 60; 
 
-// HELPER: Time Ago String
 function getTimeAgo(isoDate: string) {
     if (!isoDate) return "Unknown";
     const created = new Date(isoDate);
@@ -21,46 +20,37 @@ function getTimeAgo(isoDate: string) {
     return `${diffDays}d ago`;
 }
 
-// 🔔 DISCORD SENDER
 async function sendDiscordAlert(webhookUrl: string, leads: any[]) {
     if (!webhookUrl || leads.length === 0) return;
-
-    // Send in batches to avoid spamming Discord API too fast
-    const batchSize = 10;
-    for (let i = 0; i < leads.length; i += batchSize) {
-        const batch = leads.slice(i, i + batchSize);
-        for (const lead of batch) {
-            try {
-                await fetch(webhookUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        username: "CaratBridge Daily Report",
-                        embeds: [{
-                            title: `💎 Daily Catch: @${lead.companyName}`,
-                            url: lead.website,
-                            color: 3066993,
-                            fields: [
-                                { name: "Posted", value: lead.postAge, inline: true },
-                                { name: "Source", value: lead.businessType, inline: true },
-                                { name: "Caption", value: lead.notes ? lead.notes.substring(0, 100) : "-" }
-                            ],
-                            footer: { text: "CaratBridge Secret Finder" },
-                            timestamp: new Date().toISOString()
-                        }]
-                    })
-                });
-                // Small pause to be nice to Discord
-                await new Promise(r => setTimeout(r, 500)); 
-            } catch (e) { console.error("Discord Error", e); }
-        }
+    for (const lead of leads) {
+        try {
+            await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: "CaratBridge Watchtower",
+                    embeds: [{
+                        title: `💎 Fresh Post: @${lead.companyName}`,
+                        url: lead.website,
+                        color: 3066993,
+                        fields: [
+                            { name: "Time", value: lead.postAge, inline: true },
+                            { name: "Source", value: lead.businessType, inline: true },
+                            { name: "Caption", value: lead.notes || "-" }
+                        ],
+                        footer: { text: "CaratBridge Secret Finder" },
+                        timestamp: new Date().toISOString()
+                    }]
+                })
+            });
+        } catch (e) { console.error("Discord Error", e); }
     }
 }
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { action, tag, force, limit } = body; // 👈 NOW READING 'limit'
+    const { action, tag, force, limit } = body;
 
     // --- ACTIONS ---
     if (action === "start") { setRunningStatus(true); return NextResponse.json({ success: true, message: "Started" }); }
@@ -75,18 +65,34 @@ export async function POST(request: Request) {
       if (!APIFY_TOKEN) return NextResponse.json({ error: "Missing APIFY_TOKEN" });
 
       const db = getDb();
-      // If we are forcing a Daily Scan, ignore the "Running" switch
-      if (!db.isRunning && !force) return NextResponse.json({ success: false, message: "Paused" });
+
+      // 1. FORCE LOAD TAGS FROM ENV
+      let tagsToScan = [];
+
+      // 🔍 DEBUG: Read Raw Env Var
+      const rawEnvTags = process.env.WATCH_TAGS; 
+
+      if (rawEnvTags) {
+          tagsToScan = rawEnvTags.split(',').map(t => t.trim());
+      } else if (db.monitoredTags && db.monitoredTags.length > 0) {
+          tagsToScan = db.monitoredTags;
+      }
+
+      if (tagsToScan.length === 0) {
+          return NextResponse.json({ 
+              success: false, 
+              message: "No tags found.",
+              debugEnv: rawEnvTags || "WATCH_TAGS is empty on Render" // 👈 TELLS YOU THE TRUTH
+          });
+      }
 
       const client = new ApifyClient({ token: APIFY_TOKEN });
       let totalNewLeads = 0;
+      const scanLimit = limit || 20;
 
-      // Default to 50 if it's a Daily Scan (force=true), otherwise 20
-      const scanLimit = limit || (force ? 50 : 20); 
-
-      for (const monitoredTag of db.monitoredTags) {
+      for (const monitoredTag of tagsToScan) {
         try {
-          console.log(`🕵️‍♂️ Daily Scan: #${monitoredTag} (Fetching ${scanLimit} posts)...`);
+          console.log(`🕵️‍♂️ Checking #${monitoredTag}...`);
 
           const run = await client.actor("apify/instagram-hashtag-scraper").call({
               "hashtags": [monitoredTag],
@@ -105,9 +111,8 @@ export async function POST(request: Request) {
                    const now = new Date();
                    const diffHours = (now.getTime() - created.getTime()) / (1000 * 60 * 60);
 
-                   // 🚫 REJECT if older than 24 Hours (Since we run daily)
-                   // You can change this to 48 if you want a buffer
-                   if (diffHours > 26) return null; 
+                   // 🚫 FILTER: STRICT 48 HOURS
+                   if (diffHours > 48) return null;
 
                    const username = item.ownerUsername || item.owner?.username || "Unknown";
                    const caption = item.caption || "";
@@ -136,18 +141,19 @@ export async function POST(request: Request) {
               const newLeadsFound = addLeadsToDb(leads);
 
               if (newLeadsFound.length > 0) {
-                  console.log(`✅ Found ${newLeadsFound.length} FRESH posts for #${monitoredTag}`);
                   if (DISCORD_WEBHOOK) await sendDiscordAlert(DISCORD_WEBHOOK, newLeadsFound);
               }
-
               totalNewLeads += newLeadsFound.length;
           }
-        } catch (e: any) { 
-            console.error(`❌ Error scanning #${monitoredTag}:`, e.message);
-        }
+        } catch (e: any) { console.error(`Error #${monitoredTag}:`, e.message); }
       }
 
-      return NextResponse.json({ success: true, newLeads: totalNewLeads });
+      return NextResponse.json({ 
+          success: true, 
+          debugEnvTags: rawEnvTags, // 👈 SHOWS YOU WHAT RENDER SEES
+          scannedCount: tagsToScan.length,
+          newLeads: totalNewLeads 
+      });
     }
 
     return NextResponse.json({ error: "Invalid Action" });
